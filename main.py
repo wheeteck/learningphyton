@@ -1,10 +1,14 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-import chess
 import threading
 import queue
 import os
 from datetime import timedelta
+
+try:
+    import chess
+except ImportError:
+    chess = None
 
 from board_ui import ChessBoard, ChessPieces
 from game_ui import GameUI
@@ -15,11 +19,6 @@ class ChessGame:
         self.master = master
         self.master.title("Chess Game")
         self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
-
-        if chess is None:
-            messagebox.showerror("Error", "python-chess library not found. Please install it to play.")
-            master.destroy()
-            return
 
         self.board = chess.Board()
         self.selected_square = None
@@ -60,6 +59,7 @@ class ChessGame:
     def update_board(self):
         self.board_canvas.draw_pieces(self.board)
         self.update_status()
+        self.master.update_idletasks()
 
     def on_mouse_down(self, event):
         self.board_canvas.clear_highlights()
@@ -116,6 +116,7 @@ class ChessGame:
             level_index = self.game_ui.ai_levels.index(selected_level)
             time_limits = [0.5, 1, 2, 5, 10]
             time_limit = time_limits[level_index]
+
             self.ai_thread = threading.Thread(target=self.run_ai_move, args=(time_limit,))
             self.ai_thread.start()
             self.master.after(100, self.check_ai_move)
@@ -131,6 +132,7 @@ class ChessGame:
                 self.handle_capture(move)
                 san_move = self.board.san(move)
                 self.board.push(move)
+                self.update_board()
                 self.append_san_to_notation(san_move)
                 self.game_ui.ai_status_label.config(text="")
             else:
@@ -290,6 +292,11 @@ class ChessGame:
             os._exit(0)
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    game = ChessGame(root)
-    root.mainloop()
+    if chess is None:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("Error", "python-chess library not found. Please install it to play.")
+    else:
+        root = tk.Tk()
+        game = ChessGame(root)
+        root.mainloop()

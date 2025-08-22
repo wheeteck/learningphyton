@@ -1,5 +1,7 @@
 import chess
 import time
+import random
+from opening_book import OPENING_BOOK
 
 class TimeUpError(Exception):
     pass
@@ -7,13 +9,6 @@ class TimeUpError(Exception):
 class ChessAI:
     def __init__(self, game):
         self.game = game
-        self.opening_book = {
-            'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1': 'e2e4',
-            'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1': 'c7c5', # Sicilian Defense
-            'rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2': 'g1f3',
-            'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1': 'd2d4',
-            'rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1': 'g8f6', # Indian Defense
-        }
         self.piece_values = {
             chess.PAWN: 1,
             chess.KNIGHT: 3,
@@ -42,28 +37,134 @@ class ChessAI:
         return score
 
     def find_best_move(self, board, time_limit):
-        fen = board.fen()
-        if fen in self.opening_book:
-            move_uci = self.opening_book[fen]
-            return 0, chess.Move.from_uci(move_uci)
+        # Phase 1: Opening Book
+        if len(board.move_stack) < 6:
+            fen = board.fen()
+            if fen in OPENING_BOOK:
+                move_uci = random.choice(OPENING_BOOK[fen])
+                return 0, chess.Move.from_uci(move_uci)
 
+        # Phase 2: Principled Search
+        if len(board.move_stack) < 20:
+            return self._find_principled_search_move(board)
+
+        # Phase 3: Pure Engine
+        return self._find_best_move_ab(board, time_limit)
+
+    def _find_principled_search_move(self, board):
+        best_moves = []
+        best_score = -float('inf')
+
+        for move in board.legal_moves:
+            # Get principles score for the move
+            principles_score = self._score_move_by_principles(board, move)
+
+            # Get static evaluation of the position after the move
+            temp_board = board.copy()
+            temp_board.push(move)
+            static_eval = self.evaluate_board(temp_board)
+
+            # The static evaluation is from White's perspective.
+            # If it's Black to move, a higher score is worse for Black.
+            # We want to maximize our own score.
+            if board.turn == chess.BLACK:
+                static_eval = -static_eval
+
+            # Combine scores (weights may need tuning)
+            combined_score = principles_score + static_eval
+
+            if combined_score > best_score:
+                best_score = combined_score
+                best_moves = [move]
+            elif combined_score == best_score:
+                best_moves.append(move)
+
+        # Randomly choose from the best moves
+        return 0, random.choice(best_moves) if best_moves else None
+
+
+    def _find_best_move_ab(self, board, time_limit):
         start_time = time.time()
 
-        # Fallback to a random move if time is very short
         legal_moves = list(board.legal_moves)
         if not legal_moves:
             return 0, None
         best_move = legal_moves[0]
 
         try:
-            for depth in range(1, 10): # Max depth of 10
+            for depth in range(1, 10):
                 _, move = self.alphabeta(board, depth, -float('inf'), float('inf'), board.turn, start_time, time_limit)
                 if move:
                     best_move = move
         except TimeUpError:
-            pass # Time is up, return the best move found so far
+            pass
 
         return 0, best_move
+
+    def _score_move_by_principles(self, board, move):
+        score = 0
+        piece = board.piece_at(move.from_square)
+
+        # --- Tactical Awareness ---
+
+        # 1. Captures
+        if board.is_capture(move):
+            captured_piece = board.piece_at(move.to_square)
+            if captured_piece: # Should not be None, but good practice to check
+                score += 10 * self.piece_values[captured_piece.piece_type]
+
+        # Create a temporary board to analyze the position *after* the move
+        temp_board = board.copy()
+        temp_board.push(move)
+
+        # 2. Piece Safety
+        # Check if the piece we just moved is now under attack
+        if temp_board.is_attacked_by(not board.turn, move.to_square):
+            score -= 10 * self.piece_values[piece.piece_type]
+
+        # 3. Creating Threats
+        # Give a small bonus for each new piece we are attacking
+        for sq in chess.SQUARES:
+            if temp_board.is_attacked_by(board.turn, sq) and temp_board.piece_at(sq) is not None:
+                score += 1
+
+
+        # --- Positional Principles ---
+
+        # Principle: Control the center
+        center_squares = [chess.E4, chess.D4, chess.E5, chess.D5]
+        if move.to_square in center_squares:
+            if piece.piece_type == chess.PAWN:
+                score += 5 # Pawn to center is good, but not worth as much as tactical considerations
+            else:
+                score += 2
+
+        # Principle: Develop minor pieces
+        if piece.piece_type in [chess.KNIGHT, chess.BISHOP]:
+            is_development_move = False
+            if piece.color == chess.WHITE and chess.square_rank(move.from_square) in [0, 1]:
+                is_development_move = True
+            elif piece.color == chess.BLACK and chess.square_rank(move.from_square) in [6, 7]:
+                is_development_move = True
+            if is_development_move:
+                score += 4
+
+        # Principle: Castle early
+        if board.is_castling(move):
+            score += 10
+
+        # Principle: Avoid moving the same piece twice
+        if len(board.move_stack) < 20 and piece.piece_type != chess.PAWN:
+                for m in board.move_stack:
+                    if m.from_square == move.from_square:
+                        score -= 3
+                        break
+
+        # Principle: Don't bring the queen out too early
+        if piece.piece_type == chess.QUEEN and len(board.move_stack) < 10:
+            score -= 5
+
+        return score
 
     def alphabeta(self, board, depth, alpha, beta, maximizing_player, start_time, time_limit):
         if time.time() - start_time > time_limit:
